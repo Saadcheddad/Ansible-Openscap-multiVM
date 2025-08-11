@@ -1,0 +1,13 @@
+# local/OS junk
+.DS_Store
+# python/venv
+venv/ .venv/
+# ansible artifacts
+*.retry
+# sectrets/keys (NEVER commit private keys)
+*.pem
+*.key
+id_*
+# reports can be large/sensitive; keep out by default
+reports/*
+!reports/.gitkeep
