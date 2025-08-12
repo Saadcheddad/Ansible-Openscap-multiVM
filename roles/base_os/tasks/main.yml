@@ -1,0 +1,92 @@
+
+
+- name: Set timezone
+  ansible.builtin.command: timedatectl set-timezone Africa/Casablanca
+  changed_when: false
+
+- name: Install base packages (Ubuntu/Debian or RHEL/OL)
+  ansible.builtin.package:
+    name: "{{ (ansible_os_family== 'Debian') | ternary(['ufw','rsyslog','fail2ban'],                        ['firewalld','rsyslog','fail2ban']) }}"
+    state: present
+
+# Debian/Ubuntu (UFW)
+- name: Ensure UFW installed
+  when: ansible_os_family == 'Debian'
+  ansible.builtin.package:
+    name: ufw
+    state: present
+
+- name: Allow SSH (UFW)
+  when: ansible_os_family == 'Debian'
+  community.general.ufw:
+    rule: allow
+    name: OpenSSH
+
+- name: Allow HTTP (UFW)
+  when: ansible_os_family == 'Debian'
+  community.general.ufw:
+    rule: allow
+    port: '80'
+    proto: tcp
+
+- name: Enable UFW
+  when: ansible_os_family == 'Debian'
+  community.general.ufw:
+    state: enabled
+
+# RHEL/Oracle (firewalld)
+- name: Ensure firewalld running
+  when: ansible_os_family == 'RedHat'
+  ansible.builtin.service:
+    name: firewalld
+    enabled: true
+    state: started
+
+- name: Allow SSH (firewalld)
+  when: ansible_os_family == 'RedHat'
+  ansible.posix.firewalld:
+    service: ssh
+    permanent: true
+    immediate: true
+    state: enabled
+
+- name: Allow HTTP (firewalld)
+  when: ansible_os_family == 'RedHat'
+  ansible.posix.firewalld:
+    service: http
+    permanent: true
+    immediate: true
+    state: enabled
+
+
+- name: Ensure rsyslog and fail2ban enabled
+  ansible.builtin.service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop: "{{ (ansible_os_family == 'Debian')
+            | ternary (['rsyslog','fail2ban'],['rsyslog','fail2ban']) }}"
+
+- name: Create ops user with sudo/wheel
+  ansible.builtin.user:
+    name: ops
+    shell: /bin/bash
+    groups: "{{ (ansible_os_family == 'Debian') | ternary('sudo','wheel') }}"
+    append: true
+- name: Authorize your SSH key for ops
+  ansible.builtin.authorized_key:
+    user: ops
+    key: "{{ lookup('file', lookup('env','HOME')+'/.ssh/id_ed25519.pub') }}"
+
+- name: Disable root SSH login
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?PermitRootLogin'
+    line: 'PermitRootLogin no'
+    backup: yes
+  notify: Restart sshd
+
+
+
+
+

@@ -11,3 +11,8 @@ id_*
 # reports can be large/sensitive; keep out by default
 reports/*
 !reports/.gitkeep
+reports/
+venv/
+*.retry
+__pycache__/
+
