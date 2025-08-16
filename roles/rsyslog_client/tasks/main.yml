@@ -1,0 +1,15 @@
+- name: Forward ALL logs to log1 over TCP (keep local logs too)
+  ansible.builtin.copy:
+    dest: /etc/rsyslog.d/90-forward-to-log1.conf
+    content: |
+      # *.*  = all facilities, all severities
+      # @@   = TCP (single @ would be UDP)
+      *.* @@{{ hostvars[groups['logserver'][0]].ansible_host
+               | default(groups['logserver'][0]) }}:514
+  notify: Restart rsyslog
+
+- name: Ensure rsyslog is enabled and running
+  ansible.builtin.service:
+    name: rsyslog
+    enabled: true
+    state: started

@@ -1,0 +1,7 @@
+- hosts: logserver
+  become: true
+  roles: [rsyslog_server]
+
+- hosts: servers
+  become: true
+  roles: [rsyslog_client]

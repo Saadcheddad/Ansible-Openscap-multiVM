@@ -1,0 +1,43 @@
+
+- name: Ensure parent directory for remote logs exists
+  ansible.builtin.file:
+    path: /var/log/remote
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Configure rsyslog to listen on TCP/514 and store per-host (ruleset)
+  ansible.builtin.copy:
+    dest: /etc/rsyslog.d/10-remote-tcp.conf
+    content: |
+      module(load="imtcp")
+      input(type="imtcp" port="514" ruleset="RemoteLogs")
+
+      template(name="PerHost" type="string"
+               string="/var/log/remote/%HOSTNAME%/messages.log")
+
+      ruleset(name="RemoteLogs") {
+        action(type="omfile" dynaFile="PerHost" createDirs="on")
+        stop
+      }
+  notify: Restart rsyslog
+
+- name: Open firewall (Debian/Ubuntu)
+  when: ansible_os_family == 'Debian'
+  ansible.builtin.shell: "ufw allow 514/tcp"
+  args: { executable: /bin/bash }
+
+- name: Open firewall (RHEL/Oracle Linux)
+  when: ansible_os_family == 'RedHat'
+  ansible.builtin.shell: |
+    systemctl enable --now firewalld
+    firewall-cmd --permanent --add-port=514/tcp
+    firewall-cmd --reload
+  args: { executable: /bin/bash }
+
+- name: Ensure rsyslog is enabled and running
+  ansible.builtin.service:
+    name: rsyslog
+    enabled: true
+    state: started
