@@ -1,0 +1,43 @@
+- name: Ubuntu/Debian auto updates
+  when: ansible_os_family == 'Debian'
+  block:
+    - name: Install unattended-upgrades
+      ansible.builtin.package:
+        name: unattended-upgrades
+        state: present
+
+
+      # Tells APT to run daily and apply unattended upgrades.
+    - name: Enable periodic updates(daily) + unattended upgrades
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+
+# Oracle Linux / RHEL path
+- name: OL/RHEL auto updates
+  when: ansible_os_family == 'RedHat'
+  block:
+    - name: Install dnf-automatic
+      ansible.builtin.package:
+        name: dnf-automatic
+        state: present
+
+    # Select security-only upgrades and apply them automatically.
+    - name: Configure dnf-automatic for security updates
+      ansible.builtin.lineinfile:
+        path: /etc/dnf/automatic.conf
+        regexp: '^upgrade_type|^apply_updates'
+        line: "{{ item }}"
+        create: no
+      loop:
+        - 'upgrade_type = security'
+        - 'apply_updates = yes'
+
+    # Start the systemd timer (schedule the updates job)
+    - name: Enable and start dnf-automatic timer
+      ansible.builtin.systemd:
+        name: dnf-automatic.timer
+        enabled: true
+        state: started
