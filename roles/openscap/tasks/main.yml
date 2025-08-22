@@ -1,0 +1,63 @@
+---
+- name: Install tools (Ubuntu)
+  when: ansible_distribution == 'Ubuntu'
+  become: true
+  apt:
+    name:
+      - openscap-scanner
+      - openscap-utils
+      - bzip2
+      - ca-certificates
+      - curl
+      - lsb-release
+    state: present
+    update_cache: true
+
+- name: Install weekly OVAL job
+  when: ansible_distribution == 'Ubuntu'
+  become: true
+  copy:
+    dest: /etc/cron.weekly/openscap-oval
+    mode: '0755'
+    content: |
+      #!/bin/bash
+      CODENAME=$(
+        lsb_release -cs 2>/dev/null || { . /etc/os-release; echo "$VERSION_CODENAME"; }
+      )
+      OUTDIR=/var/log/openscap
+      mkdir -p "$OUTDIR"
+
+      FEED="$OUTDIR/com.ubuntu.${CODENAME}.usn.oval.xml"
+      TMP="${FEED}.bz2"
+
+      if curl -fsSL "https://security-metadata.canonical.com/oval/com.ubuntu.${CODENAME}.usn.oval.xml.bz2" -o "$TMP"; then
+        bzip2 -f -d "$TMP"
+        REPORT="$OUTDIR/oval-${CODENAME}-$(date +%F).html"
+        oscap oval eval --report "$REPORT" "$FEED" || true
+        ln -sfn "$REPORT" "$OUTDIR/oval-latest.html"
+      fi
+
+# Run once now (to test it)
+- name: Run weekly job now
+  when: (ansible_distribution == 'Ubuntu') and (openscap_run_now | default(true))
+  become: true
+  command: /etc/cron.weekly/openscap-oval
+  register: run_now
+  failed_when: false
+  changed_when: run_now.rc == 0
+
+# Fetch latest HTML to controller 
+- name: Check latest report on node
+  when: openscap_fetch | default(true)
+  become: true
+  stat:
+    path: /var/log/openscap/oval-latest.html
+  register: st_latest
+
+- name: Fetch latest HTML
+  when: (openscap_fetch | default(true)) and st_latest.stat.exists
+  become: true
+  fetch:
+    src: /var/log/openscap/oval-latest.html
+    dest: "{{ playbook_dir }}/reports/oval-latest-{{ inventory_hostname }}.html"
+    flat: true
