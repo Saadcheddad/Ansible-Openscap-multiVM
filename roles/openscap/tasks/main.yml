@@ -1,63 +1,198 @@
 ---
-- name: Install tools (Ubuntu)
+# Vars you can override from the playbook:
+# openscap_run_now: true
+# openscap_fetch:  true
+# openscap_ssg_version: "0.1.77"
+# openscap_profile: "xccdf_org.ssgproject.content_profile_cis_level2_server"
+
+- name: "Default vars"
+  set_fact:
+    openscap_ssg_version: "{{ openscap_ssg_version | default('0.1.77') }}"
+    openscap_profile: "{{ openscap_profile | default('xccdf_org.ssgproject.content_profile_cis_level2_server') }}"
+
+- name: "Install tools (Ubuntu)"
   when: ansible_distribution == 'Ubuntu'
   become: true
   apt:
     name:
       - openscap-scanner
       - openscap-utils
+      - unzip
+      - wget
+      - curl
       - bzip2
       - ca-certificates
-      - curl
       - lsb-release
     state: present
     update_cache: true
 
-- name: Install weekly OVAL job
+- name: "Ensure working/output dirs"
+  become: true
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /opt/ssg
+    - /var/log/openscap
+
+# --- Get SSG content vX.Y.Z and unzip
+- name: "Download SSG zip v{{ openscap_ssg_version }}"
+  become: true
+  get_url:
+    url: "https://github.com/ComplianceAsCode/content/releases/download/v{{ openscap_ssg_version }}/scap-security-guide-{{ openscap_ssg_version }}.zip"
+    dest: "/opt/ssg/scap-security-guide-{{ openscap_ssg_version }}.zip"
+    mode: '0644'
+
+- name: "Unzip SSG v{{ openscap_ssg_version }}"
+  become: true
+  unarchive:
+    src: "/opt/ssg/scap-security-guide-{{ openscap_ssg_version }}.zip"
+    dest: /opt/ssg/
+    remote_src: true
+    creates: "/opt/ssg/scap-security-guide-{{ openscap_ssg_version }}"
+
+# --- Pick best Ubuntu DS: 2404 -> 2204 -> 2004
+- name: "Find ubuntu2404 DS"
+  become: true
+  find:
+    paths: "/opt/ssg/scap-security-guide-{{ openscap_ssg_version }}"
+    patterns: "ssg-ubuntu2404-ds.xml"
+    recurse: true
+  register: ds2404
+
+- name: "Find ubuntu2204 DS (fallback)"
+  become: true
+  when: ds2404.matched|int == 0
+  find:
+    paths: "/opt/ssg/scap-security-guide-{{ openscap_ssg_version }}"
+    patterns: "ssg-ubuntu2204-ds.xml"
+    recurse: true
+  register: ds2204
+
+- name: "Find ubuntu2004 DS (fallback)"
+  become: true
+  when: (ds2404.matched|int == 0) and (ds2204.matched|default(0)|int == 0)
+  find:
+    paths: "/opt/ssg/scap-security-guide-{{ openscap_ssg_version }}"
+    patterns: "ssg-ubuntu2004-ds.xml"
+    recurse: true
+  register: ds2004
+
+- name: "Pick datastream path"
+  set_fact:
+    ssg_ds_path: >-
+      {{ (ds2404.files[0].path if ds2404.matched|int > 0
+          else (ds2204.files[0].path if (ds2204|default({'matched':0})).matched|int > 0
+                else (ds2004.files[0].path if (ds2004|default({'matched':0})).matched|int > 0
+                      else ''))) }}
+
+- name: "Fail if no Ubuntu DS found"
+  when: ssg_ds_path == ''
+  fail:
+    msg: "No Ubuntu datastream found in SSG v{{ openscap_ssg_version }} (looked for 2404/2204/2004)."
+
+# --- Weekly job: OVAL + XCCDF (CIS Level 2 Server by default)
+- name: "Install weekly OVAL+XCCDF job"
   when: ansible_distribution == 'Ubuntu'
   become: true
   copy:
-    dest: /etc/cron.weekly/openscap-oval
+    dest: /etc/cron.weekly/openscap-both
     mode: '0755'
     content: |
       #!/bin/bash
+      set -e
       CODENAME=$(
         lsb_release -cs 2>/dev/null || { . /etc/os-release; echo "$VERSION_CODENAME"; }
       )
       OUTDIR=/var/log/openscap
       mkdir -p "$OUTDIR"
 
+      # --- OVAL (Canonical USN feed) ---
       FEED="$OUTDIR/com.ubuntu.${CODENAME}.usn.oval.xml"
       TMP="${FEED}.bz2"
-
       if curl -fsSL "https://security-metadata.canonical.com/oval/com.ubuntu.${CODENAME}.usn.oval.xml.bz2" -o "$TMP"; then
-        bzip2 -f -d "$TMP"
-        REPORT="$OUTDIR/oval-${CODENAME}-$(date +%F).html"
-        oscap oval eval --report "$REPORT" "$FEED" || true
-        ln -sfn "$REPORT" "$OUTDIR/oval-latest.html"
+        bzip2 -f -d "$TMP" || true
+        OVAL_REPORT="$OUTDIR/oval-${CODENAME}-$(date +%F).html"
+        oscap oval eval --report "$OVAL_REPORT" "$FEED" || true
+        ln -sfn "$OVAL_REPORT" "$OUTDIR/oval-latest.html"
       fi
 
-# Run once now (to test it)
-- name: Run weekly job now
+      # --- XCCDF (SSG datastream) ---
+      DS_PATH="{{ ssg_ds_path }}"
+      PROFILE="{{ openscap_profile }}"
+      if [ ! -f "$DS_PATH" ]; then
+        # try to rediscover under the same SSG version if the path moved
+        DS_BASE="/opt/ssg/scap-security-guide-{{ openscap_ssg_version }}"
+        for c in ubuntu2404 ubuntu2204 ubuntu2004; do
+          cand=$(find "$DS_BASE" -name "ssg-${c}-ds.xml" -type f 2>/dev/null | head -n1)
+          [ -n "$cand" ] && DS_PATH="$cand" && break
+        done
+      fi
+
+      if [ -f "$DS_PATH" ]; then
+        TS=$(date +%F)
+        XCCDF_RES="$OUTDIR/xccdf-results-${TS}.xml"
+        XCCDF_ARF="$OUTDIR/xccdf-arf-${TS}.xml"
+        XCCDF_REPORT="$OUTDIR/xccdf-${TS}.html"
+        oscap xccdf eval \
+          --profile "$PROFILE" \
+          --oval-results \
+          --results "$XCCDF_RES" \
+          --results-arf "$XCCDF_ARF" \
+          --report "$XCCDF_REPORT" \
+          "$DS_PATH" || true
+        ln -sfn "$XCCDF_REPORT" "$OUTDIR/xccdf-latest.html"
+
+        # remediation script from the current results
+        RID=$(oscap info "$XCCDF_RES" | awk -F': ' '/Result ID/{print $2; exit}')
+        if [ -n "$RID" ]; then
+          FIX="$OUTDIR/fix-${TS}.sh"
+          oscap xccdf generate fix \
+            --fix-type bash \
+            --result-id "$RID" \
+            "$XCCDF_RES" > "$FIX" || true
+          chmod 0750 "$FIX" || true
+          ln -sfn "$FIX" "$OUTDIR/fix-latest.sh"
+        fi
+      fi
+
+# --- Run once now (both scans) ---
+- name: "Run weekly job now"
   when: (ansible_distribution == 'Ubuntu') and (openscap_run_now | default(true))
   become: true
-  command: /etc/cron.weekly/openscap-oval
+  command: /etc/cron.weekly/openscap-both
   register: run_now
   failed_when: false
   changed_when: run_now.rc == 0
 
-# Fetch latest HTML to controller 
-- name: Check latest report on node
+# --- Fetch latest reports to controller ---
+- name: "Check & fetch latest OVAL report"
   when: openscap_fetch | default(true)
   become: true
   stat:
     path: /var/log/openscap/oval-latest.html
-  register: st_latest
+  register: st_oval
 
-- name: Fetch latest HTML
-  when: (openscap_fetch | default(true)) and st_latest.stat.exists
+- name: "Fetch OVAL latest"
+  when: (openscap_fetch | default(true)) and st_oval.stat.exists
   become: true
   fetch:
     src: /var/log/openscap/oval-latest.html
     dest: "{{ playbook_dir }}/reports/oval-latest-{{ inventory_hostname }}.html"
+    flat: true
+
+- name: "Check & fetch latest XCCDF report"
+  when: openscap_fetch | default(true)
+  become: true
+  stat:
+    path: /var/log/openscap/xccdf-latest.html
+  register: st_xccdf
+
+- name: "Fetch XCCDF latest"
+  when: (openscap_fetch | default(true)) and st_xccdf.stat.exists
+  become: true
+  fetch:
+    src: /var/log/openscap/xccdf-latest.html
+    dest: "{{ playbook_dir }}/reports/xccdf-latest-{{ inventory_hostname }}.html"
     flat: true

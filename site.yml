@@ -1,0 +1,12 @@
+# site.yml
+- hosts: all
+  become: true
+  roles: [base_os, updates, openscap]
+
+- hosts: logserver
+  become: true
+  roles: [rsyslog_server]
+
+- hosts: servers
+  become: true
+  roles: [rsyslog_client]
